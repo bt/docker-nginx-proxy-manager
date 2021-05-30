@@ -5,7 +5,7 @@
 #
 
 # Pull base image.
-FROM arm64v8/alpine:3.12
+FROM arm64v8/node:16-alpine3.12
 
 # Docker image version is provided via build arg.
 ARG DOCKER_IMAGE_VERSION=unknown
@@ -24,8 +24,53 @@ ARG NGINX_HTTP_GEOIP2_MODULE_URL=https://github.com/leev/ngx_http_geoip2_module/
 ARG LIBMAXMINDDB_URL=https://github.com/maxmind/libmaxminddb/releases/download/${LIBMAXMINDDB_VERSION}/libmaxminddb-${LIBMAXMINDDB_VERSION}.tar.gz
 ARG WATCH_URL=https://github.com/tj/watch/archive/${WATCH_VERSION}.tar.gz
 
+# Define s6 overlay related variables.
+ARG S6_OVERLAY_ARCH=aarch64
+ARG S6_OVERLAY_VERSION=1.21.4.0
+ARG S6_OVERLAY_URL=https://github.com/just-containers/s6-overlay/releases/download/v${S6_OVERLAY_VERSION}/s6-overlay-${S6_OVERLAY_ARCH}.tar.gz
+
 # Define working directory.
 WORKDIR /tmp
+
+# Copy helpers
+COPY helpers/* /usr/local/bin/
+
+# Copy builds
+COPY builds/frontend.tar.gz /opt/
+
+# Install s6 overlay.
+RUN \
+    add-pkg --virtual build-dependencies curl tar patch && \
+    echo "Downloading s6-overlay..." && \
+    curl -# -L ${S6_OVERLAY_URL} | tar -xz -C / && \
+    # Services dependencies support.
+    echo "Patching s6-overlay..." && \
+    curl -# -L https://github.com/jlesage/s6-overlay/commit/d151c41.patch | patch -d / -p3 && \
+    chmod +x \
+        /etc/s6/services/.s6-svscan/SIGHUP \
+        /etc/s6/services/.s6-svscan/SIGINT \
+        /etc/s6/services/.s6-svscan/SIGQUIT \
+        /etc/s6/services/.s6-svscan/SIGTERM \
+        /usr/bin/sv-getdeps \
+        && \
+    # Cleanup
+    del-pkg build-dependencies && \
+    rm -rf /tmp/* /tmp/.[!.]*
+
+# Install system packages.
+RUN \
+    add-pkg \
+        # For timezone support
+        tzdata \
+        # For 'groupmod' command
+        shadow
+
+# Save some defaults.
+RUN \
+    mkdir /defaults && \
+    cp /etc/passwd /defaults/ && \
+    cp /etc/group /defaults/ && \
+    cp /etc/shadow /defaults/
 
 # Build and install the watch binary.
 RUN \
@@ -176,7 +221,6 @@ RUN \
 # Install dependencies.
 RUN \
     add-pkg \
-        nodejs \
         py3-pip \
         sqlite \
         openssl \
@@ -215,8 +259,8 @@ RUN \
         build-base \
         curl \
         patch \
-        yarn \
         git \
+	python2 \
         python3 \
         npm \
         bash \
@@ -224,7 +268,8 @@ RUN \
 
     # Install node-prune.
     echo "Installing node-prune..." && \
-    curl -sfL https://install.goreleaser.com/github.com/tj/node-prune.sh | bash -s -- -b /tmp/bin && \
+    mkdir -p /tmp/bin && \
+    curl -sfL https://gobinaries.com/tj/node-prune | PREFIX=/tmp/bin sh && \
 
     # Download the Nginx Proxy Manager package.
     echo "Downloading Nginx Proxy Manager package..." && \
@@ -239,9 +284,7 @@ RUN \
     # Build Nginx Proxy Manager frontend.
     echo "Building Nginx Proxy Manager frontend..." && \
     cd /app/frontend && \
-    yarn install && \
-    yarn build && \
-    /tmp/bin/node-prune && \
+    tar xvf /opt/frontend.tar.gz && \
     cd /tmp && \
 
     # Build Nginx Proxy Manager backend.
@@ -250,6 +293,9 @@ RUN \
     yarn install --prod && \
     /tmp/bin/node-prune && \
     cd /tmp && \
+
+    # Quick cleanup
+    rm -rf /opt/frontend.tar.gz && \
 
     # Install Nginx Proxy Manager.
     echo "Installing Nginx Proxy Manager..." && \
@@ -267,26 +313,26 @@ RUN \
     rm /etc/nginx/conf.d/dev.conf && \
 
     # Change the management interface port to the unprivileged port 8181.
-    #sed-patch 's|81 default|8181 default|' /etc/nginx/conf.d/production.conf && \
+    sed-patch 's|81 default|8181 default|' /etc/nginx/conf.d/production.conf && \
 
     # Change the management interface root.
     sed-patch 's|/app/frontend;|/opt/nginx-proxy-manager/frontend;|' /etc/nginx/conf.d/production.conf && \
 
     # Change the HTTP port 80 to the unprivileged port 8080.
-    #sed-patch 's|80;|8080;|' /etc/nginx/conf.d/default.conf && \
-    #sed-patch 's|"80";|"8080";|' /etc/nginx/conf.d/default.conf && \
-    #sed-patch 's|listen 80;|listen 8080;|' /opt/nginx-proxy-manager/templates/letsencrypt-request.conf && \
-    #sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/letsencrypt-request.conf && \
-    #sed-patch 's|listen 80;|listen 8080;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
-    #sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
-    #sed-patch 's|listen 80 |listen 8080 |' /opt/nginx-proxy-manager/templates/default.conf && \
-    #sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/default.conf && \
+    sed-patch 's|80;|8080;|' /etc/nginx/conf.d/default.conf && \
+    sed-patch 's|"80";|"8080";|' /etc/nginx/conf.d/default.conf && \
+    sed-patch 's|listen 80;|listen 8080;|' /opt/nginx-proxy-manager/templates/letsencrypt-request.conf && \
+    sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/letsencrypt-request.conf && \
+    sed-patch 's|listen 80;|listen 8080;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
+    sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
+    sed-patch 's|listen 80 |listen 8080 |' /opt/nginx-proxy-manager/templates/default.conf && \
+    sed-patch 's|:80;|:8080;|' /opt/nginx-proxy-manager/templates/default.conf && \
 
     # Change the HTTPs port 443 to the unprivileged port 4443.
-    #sed-patch 's|443 |4443 |' /etc/nginx/conf.d/default.conf && \
-    #sed-patch 's|"443";|"4443";|' /etc/nginx/conf.d/default.conf && \
-    #sed-patch 's|listen 443 |listen 4443 |' /opt/nginx-proxy-manager/templates/_listen.conf && \
-    #sed-patch 's|:443;|:4443;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
+    sed-patch 's|443 |4443 |' /etc/nginx/conf.d/default.conf && \
+    sed-patch 's|"443";|"4443";|' /etc/nginx/conf.d/default.conf && \
+    sed-patch 's|listen 443 |listen 4443 |' /opt/nginx-proxy-manager/templates/_listen.conf && \
+    sed-patch 's|:443;|:4443;|' /opt/nginx-proxy-manager/templates/_listen.conf && \
 
     # Fix nginx test command line.
     sed-patch 's|-g "error_log off;"||' /opt/nginx-proxy-manager/internal/nginx.js && \
@@ -328,7 +374,7 @@ RUN \
     find /opt/nginx-proxy-manager -name "*.cc" -delete && \
     find /opt/nginx-proxy-manager -name "*.c" -delete && \
     find /opt/nginx-proxy-manager -name "*.gyp" -delete && \
-    rm -r \
+    rm -rf \
         /app \
         /usr/lib/node_modules \
         && \
@@ -339,14 +385,11 @@ RUN \
     # Install packages needed by the build.
     add-pkg --virtual build-dependencies \
         go \
-        upx \
         git \
         musl-dev \
         && \
     mkdir /tmp/go && \
     env GOPATH=/tmp/go go get gophers.dev/cmds/bcrypt-tool && \
-    strip /tmp/go/bin/bcrypt-tool && \
-    upx /tmp/go/bin/bcrypt-tool && \
     cp -v /tmp/go/bin/bcrypt-tool /usr/bin/ && \
     # Cleanup.
     del-pkg build-dependencies && \
@@ -356,22 +399,31 @@ RUN \
 COPY rootfs/ /
 
 # Set environment variables.
-ENV APP_NAME="Nginx Proxy Manager" \
-    DISABLE_IPV6=0
+ENV LANG=${GLIBC_LOCALE} \
+    S6_BEHAVIOUR_IF_STAGE2_FAILS=3 \
+    S6_SERVICE_DEPS=1 \
+    USER_ID=1000 \
+    GROUP_ID=1000 \
+    APP_NAME="Nginx Proxy Manager" \
+    APP_USER=app \
+    DISABLE_IPV6=0 \
+    XDG_DATA_HOME=/config/xdg/data \
+    XDG_CONFIG_HOME=/config/xdg/config \
+    XDG_CACHE_HOME=/config/xdg/cache \
+    XDG_RUNTIME_DIR=/tmp/run/user/app
 
 # Define mountable directories.
 VOLUME ["/config"]
+
+# Define default command.
+# Use S6 overlay init system.
+CMD ["/init"]
 
 # Expose ports.
 #   - 8080: HTTP traffic
 #   - 4443: HTTPs traffic
 #   - 8181: Management web interface
-#EXPOSE 8080 4443 8181
-
-#   - 80: HTTP traffic
-#   - 81: Management web interface
-#   - 443: HTTPs traffic
-EXPOSE 80 81 443
+EXPOSE 8080 4443 8181
 
 # Metadata.
 LABEL \
